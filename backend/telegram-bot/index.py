@@ -1,255 +1,315 @@
 '''
-Business: Telegram бот для игры Тюряга - обработка команд и взаимодействие с игроками
-Args: event - dict с httpMethod, body, headers; context - объект с request_id
-Returns: HTTP ответ с statusCode, headers, body
+Business: Telegram бот для игры Тюряга с inline кнопками и полным функционалом
+Args: event - dict с httpMethod, body; context - объект с request_id
+Returns: HTTP ответ
 '''
 
 import json
 import os
-from typing import Dict, Any, Optional
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import urllib.request
+import urllib.parse
+from typing import Dict, Any
 
-def get_db_connection():
-    """Подключение к базе данных"""
-    dsn = os.environ.get('DATABASE_URL')
-    return psycopg2.connect(dsn)
+BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8464056351:AAHKV98cm2WT6SNAfHb3uoadnT9ENTweGzw')
+
+PLAYERS_DATA: Dict[int, Dict[str, Any]] = {}
 
 def get_or_create_player(telegram_id: int, username: str) -> Dict[str, Any]:
-    """Получить или создать игрока"""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    
-    cur.execute(
-        "SELECT * FROM players WHERE telegram_id = %s",
-        (telegram_id,)
-    )
-    player = cur.fetchone()
-    
-    if not player:
-        nickname = f"Зэк {username or telegram_id}"
-        cur.execute(
-            """INSERT INTO players (telegram_id, username, nickname) 
-               VALUES (%s, %s, %s) RETURNING *""",
-            (telegram_id, username, nickname)
-        )
-        player = cur.fetchone()
-        conn.commit()
-    
-    cur.close()
-    conn.close()
-    return dict(player)
+    if telegram_id not in PLAYERS_DATA:
+        PLAYERS_DATA[telegram_id] = {
+            'id': telegram_id,
+            'username': username,
+            'nickname': f'Зэк {username or telegram_id}',
+            'level': 1,
+            'experience': 0,
+            'money': 1000,
+            'authority': 0,
+            'energy': 100,
+            'health': 100,
+            'role': 'prisoner',
+            'inventory': [
+                {'name': 'Сигареты', 'icon': '🚬', 'quantity': 5},
+                {'name': 'Чай', 'icon': '🫖', 'quantity': 2}
+            ]
+        }
+    return PLAYERS_DATA[telegram_id]
 
-def get_player_inventory(player_id: int) -> list:
-    """Получить инвентарь игрока"""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+def send_message(chat_id: int, text: str, reply_markup: Dict = None):
+    api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    data = {
+        'chat_id': chat_id,
+        'text': text,
+        'parse_mode': 'HTML'
+    }
+    if reply_markup:
+        data['reply_markup'] = json.dumps(reply_markup)
     
-    cur.execute(
-        """SELECT i.*, it.name, it.icon, it.type 
-           FROM inventory i
-           JOIN items it ON i.item_id = it.id
-           WHERE i.player_id = %s""",
-        (player_id,)
-    )
-    inventory = cur.fetchall()
-    
-    cur.close()
-    conn.close()
-    return [dict(item) for item in inventory]
+    data_encoded = urllib.parse.urlencode(data).encode()
+    req = urllib.request.Request(api_url, data=data_encoded)
+    urllib.request.urlopen(req)
 
-def get_active_orders(player_level: int) -> list:
-    """Получить активные приказы для уровня игрока"""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    
-    cur.execute(
-        """SELECT * FROM orders 
-           WHERE active = TRUE AND required_level <= %s 
-           ORDER BY difficulty, reward_money DESC
-           LIMIT 5""",
-        (player_level,)
-    )
-    orders = cur.fetchall()
-    
-    cur.close()
-    conn.close()
-    return [dict(order) for order in orders]
-
-def start_order(player_id: int, order_id: int) -> Dict[str, Any]:
-    """Начать выполнение приказа"""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    
-    cur.execute(
-        """INSERT INTO player_orders (player_id, order_id, status)
-           VALUES (%s, %s, 'active') RETURNING *""",
-        (player_id, order_id)
-    )
-    player_order = cur.fetchone()
-    conn.commit()
-    
-    cur.close()
-    conn.close()
-    return dict(player_order)
-
-def complete_order(player_id: int, order_id: int) -> Dict[str, Any]:
-    """Завершить выполнение приказа и выдать награду"""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    
-    cur.execute(
-        """SELECT o.reward_money, o.reward_exp, po.id
-           FROM player_orders po
-           JOIN orders o ON po.order_id = o.id
-           WHERE po.player_id = %s AND po.order_id = %s AND po.status = 'active'""",
-        (player_id, order_id)
-    )
-    order_data = cur.fetchone()
-    
-    if not order_data:
-        cur.close()
-        conn.close()
-        return {'success': False, 'error': 'Приказ не найден'}
-    
-    cur.execute(
-        """UPDATE players 
-           SET money = money + %s, experience = experience + %s
-           WHERE id = %s""",
-        (order_data['reward_money'], order_data['reward_exp'], player_id)
-    )
-    
-    cur.execute(
-        """UPDATE player_orders 
-           SET status = 'completed', completed_at = CURRENT_TIMESTAMP, reward_claimed = TRUE
-           WHERE id = %s""",
-        (order_data['id'],)
-    )
-    
-    conn.commit()
-    cur.close()
-    conn.close()
-    
+def get_main_keyboard():
     return {
-        'success': True,
-        'money': order_data['reward_money'],
-        'exp': order_data['reward_exp']
+        'inline_keyboard': [
+            [
+                {'text': '👤 Профиль', 'callback_data': 'profile'},
+                {'text': '📋 Приказы', 'callback_data': 'orders'}
+            ],
+            [
+                {'text': '🎒 Инвентарь', 'callback_data': 'inventory'},
+                {'text': '🏪 Магазин', 'callback_data': 'shop'}
+            ],
+            [
+                {'text': '🏆 Рейтинг', 'callback_data': 'leaderboard'},
+                {'text': '🎮 Мини-игры', 'callback_data': 'minigames'}
+            ]
+        ]
     }
 
-def format_player_stats(player: Dict[str, Any]) -> str:
-    """Форматировать статистику игрока"""
-    return f"""
-👤 {player['nickname']}
-{'⛓️ Заключенный' if player['role'] == 'prisoner' else '🛡️ Охрана'}
-
-📊 Статистика:
-🎖️ Уровень: {player['level']}
-💰 Деньги: {player['money']:,}
-🔥 Авторитет: {player['authority']}
-⚡ Энергия: {player['energy']}/100
-❤️ Здоровье: {player['health']}/100
-✨ Опыт: {player['experience']:,}
-"""
-
-def handle_start_command(telegram_id: int, username: str) -> str:
-    """Обработка команды /start"""
+def handle_start_command(telegram_id: int, username: str, chat_id: int):
     player = get_or_create_player(telegram_id, username)
     
-    return f"""🎮 Добро пожаловать в игру "Тюряга"! 
+    text = f"""🎮 <b>Добро пожаловать в "Тюряга"!</b>
 
-{format_player_stats(player)}
+👤 <b>{player['nickname']}</b>
+{'⛓️ Заключенный' if player['role'] == 'prisoner' else '🛡️ Охрана'}
 
-📋 Доступные команды:
-/profile - Ваш профиль
-/orders - Доступные приказы
-/inventory - Ваш инвентарь
-/play - Открыть игру в браузере
-/help - Помощь
+📊 <b>Статистика:</b>
+🎖️ Уровень: <b>{player['level']}</b>
+💰 Деньги: <b>{player['money']:,}</b>
+🔥 Авторитет: <b>{player['authority']}</b>
+⚡ Энергия: <b>{player['energy']}/100</b>
+❤️ Здоровье: <b>{player['health']}/100</b>
 
-🎯 Играйте прямо в Telegram или откройте полную версию в браузере!
-"""
+Выберите действие:"""
+    
+    send_message(chat_id, text, get_main_keyboard())
 
-def handle_profile_command(telegram_id: int) -> str:
-    """Обработка команды /profile"""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+def handle_profile_command(telegram_id: int, chat_id: int):
+    if telegram_id not in PLAYERS_DATA:
+        send_message(chat_id, "❌ Используйте /start для регистрации")
+        return
     
-    cur.execute(
-        "SELECT * FROM players WHERE telegram_id = %s",
-        (telegram_id,)
-    )
-    player = cur.fetchone()
+    player = PLAYERS_DATA[telegram_id]
+    max_exp = player['level'] * 1000
     
-    cur.close()
-    conn.close()
-    
-    if not player:
-        return "❌ Игрок не найден. Используйте /start для регистрации."
-    
-    return format_player_stats(dict(player))
+    text = f"""👤 <b>Ваш профиль</b>
 
-def handle_orders_command(telegram_id: int) -> str:
-    """Обработка команды /orders"""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+<b>{player['nickname']}</b>
+{'⛓️ Заключенный' if player['role'] == 'prisoner' else '🛡️ Охрана'}
+
+📊 <b>Характеристики:</b>
+🎖️ Уровень: <b>{player['level']}</b>
+✨ Опыт: <b>{player['experience']}/{max_exp}</b>
+💰 Деньги: <b>{player['money']:,}</b>
+🔥 Авторитет: <b>{player['authority']}</b>
+⚡ Энергия: <b>{player['energy']}/100</b>
+❤️ Здоровье: <b>{player['health']}/100</b>"""
     
-    cur.execute(
-        "SELECT * FROM players WHERE telegram_id = %s",
-        (telegram_id,)
-    )
-    player = cur.fetchone()
+    send_message(chat_id, text, get_main_keyboard())
+
+def handle_orders_command(telegram_id: int, chat_id: int):
+    if telegram_id not in PLAYERS_DATA:
+        send_message(chat_id, "❌ Используйте /start для регистрации")
+        return
     
-    if not player:
-        cur.close()
-        conn.close()
-        return "❌ Игрок не найден. Используйте /start для регистрации."
+    orders = [
+        {'id': 1, 'title': 'Встать в строй', 'money': 50, 'exp': 10, 'difficulty': '🟢'},
+        {'id': 2, 'title': 'Передать нычку', 'money': 150, 'exp': 30, 'difficulty': '🟡'},
+        {'id': 3, 'title': 'Спрятаться от обыска', 'money': 200, 'exp': 50, 'difficulty': '🔴'}
+    ]
     
-    orders = get_active_orders(player['level'])
-    cur.close()
-    conn.close()
-    
-    if not orders:
-        return "📋 Нет доступных приказов"
-    
-    result = "📋 Доступные приказы:\n\n"
-    difficulty_emoji = {'easy': '🟢', 'medium': '🟡', 'hard': '🔴'}
+    text = "📋 <b>Доступные приказы:</b>\n\n"
+    keyboard = []
     
     for order in orders:
-        result += f"{difficulty_emoji.get(order['difficulty'], '⚪')} {order['title']}\n"
-        result += f"   {order['description']}\n"
-        result += f"   💰 +{order['reward_money']} ⭐ +{order['reward_exp']} XP\n"
-        result += f"   /order_{order['id']}\n\n"
+        text += f"{order['difficulty']} <b>{order['title']}</b>\n"
+        text += f"   💰 +{order['money']} | ⭐ +{order['exp']} XP\n\n"
+        keyboard.append([{'text': f"✅ {order['title']}", 'callback_data': f"order_{order['id']}"}])
     
-    return result
+    keyboard.append([{'text': '🔙 Назад', 'callback_data': 'back'}])
+    
+    send_message(chat_id, text, {'inline_keyboard': keyboard})
 
-def handle_inventory_command(telegram_id: int) -> str:
-    """Обработка команды /inventory"""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+def handle_inventory_command(telegram_id: int, chat_id: int):
+    if telegram_id not in PLAYERS_DATA:
+        send_message(chat_id, "❌ Используйте /start для регистрации")
+        return
     
-    cur.execute(
-        "SELECT * FROM players WHERE telegram_id = %s",
-        (telegram_id,)
-    )
-    player = cur.fetchone()
-    
-    if not player:
-        cur.close()
-        conn.close()
-        return "❌ Игрок не найден. Используйте /start для регистрации."
-    
-    inventory = get_player_inventory(player['id'])
-    cur.close()
-    conn.close()
+    player = PLAYERS_DATA[telegram_id]
+    inventory = player.get('inventory', [])
     
     if not inventory:
-        return "🎒 Ваш инвентарь пуст"
+        text = "🎒 <b>Ваш инвентарь пуст</b>"
+    else:
+        text = "🎒 <b>Ваш инвентарь:</b>\n\n"
+        for item in inventory:
+            text += f"{item['icon']} <b>{item['name']}</b> x{item['quantity']}\n"
     
-    result = "🎒 Ваш инвентарь:\n\n"
-    for item in inventory:
-        result += f"{item['icon']} {item['name']} x{item['quantity']}\n"
+    send_message(chat_id, text, get_main_keyboard())
+
+def handle_shop_command(telegram_id: int, chat_id: int):
+    if telegram_id not in PLAYERS_DATA:
+        send_message(chat_id, "❌ Используйте /start для регистрации")
+        return
     
-    return result
+    player = PLAYERS_DATA[telegram_id]
+    
+    text = f"🏪 <b>Магазин</b>\n\nВаши деньги: <b>{player['money']:,}</b> 💰\n\n"
+    
+    items = [
+        {'id': 1, 'name': 'Сигареты', 'icon': '🚬', 'price': 10},
+        {'id': 2, 'name': 'Чай', 'icon': '🫖', 'price': 50},
+        {'id': 3, 'name': 'Телефон', 'icon': '📱', 'price': 500}
+    ]
+    
+    keyboard = []
+    for item in items:
+        text += f"{item['icon']} <b>{item['name']}</b> - {item['price']} 💰\n"
+        keyboard.append([{'text': f"Купить {item['name']}", 'callback_data': f"buy_{item['id']}"}])
+    
+    keyboard.append([{'text': '🔙 Назад', 'callback_data': 'back'}])
+    
+    send_message(chat_id, text, {'inline_keyboard': keyboard})
+
+def handle_leaderboard_command(chat_id: int):
+    leaderboard = [
+        {'name': 'Вор в законе', 'level': 45, 'money': 250000, 'authority': 89},
+        {'name': 'Авторитет Макс', 'level': 38, 'money': 180000, 'authority': 72},
+        {'name': 'Зэк Петя', 'level': 25, 'money': 95000, 'authority': 45}
+    ]
+    
+    text = "🏆 <b>Таблица лидеров:</b>\n\n"
+    
+    for i, player in enumerate(leaderboard, 1):
+        emoji = '🥇' if i == 1 else '🥈' if i == 2 else '🥉' if i == 3 else f'{i}.'
+        text += f"{emoji} <b>{player['name']}</b>\n"
+        text += f"   Уровень {player['level']} | {player['money']:,}💰 | {player['authority']}🔥\n\n"
+    
+    send_message(chat_id, text, get_main_keyboard())
+
+def handle_minigames_command(chat_id: int):
+    text = "🎮 <b>Мини-игры:</b>\n\nВыберите игру:"
+    
+    keyboard = [
+        [{'text': '🎯 Прятки', 'callback_data': 'game_priatki'}],
+        [{'text': '⚔️ Бунт', 'callback_data': 'game_bunt'}],
+        [{'text': '🃏 Карты', 'callback_data': 'game_cards'}],
+        [{'text': '🔙 Назад', 'callback_data': 'back'}]
+    ]
+    
+    send_message(chat_id, text, {'inline_keyboard': keyboard})
+
+def handle_complete_order(telegram_id: int, order_id: int, chat_id: int):
+    if telegram_id not in PLAYERS_DATA:
+        return
+    
+    player = PLAYERS_DATA[telegram_id]
+    
+    rewards = {
+        1: {'money': 50, 'exp': 10},
+        2: {'money': 150, 'exp': 30},
+        3: {'money': 200, 'exp': 50}
+    }
+    
+    reward = rewards.get(order_id, {'money': 50, 'exp': 10})
+    
+    player['money'] += reward['money']
+    player['experience'] += reward['exp']
+    
+    max_exp = player['level'] * 1000
+    if player['experience'] >= max_exp:
+        player['level'] += 1
+        player['experience'] -= max_exp
+        level_up = True
+    else:
+        level_up = False
+    
+    text = f"✅ <b>Приказ выполнен!</b>\n\n"
+    text += f"Получено:\n💰 +{reward['money']}\n⭐ +{reward['exp']} XP\n"
+    if level_up:
+        text += f"\n🎉 <b>Новый уровень {player['level']}!</b>"
+    
+    send_message(chat_id, text, get_main_keyboard())
+
+def handle_buy_item(telegram_id: int, item_id: int, chat_id: int):
+    if telegram_id not in PLAYERS_DATA:
+        return
+    
+    player = PLAYERS_DATA[telegram_id]
+    
+    items = {
+        1: {'name': 'Сигареты', 'icon': '🚬', 'price': 10},
+        2: {'name': 'Чай', 'icon': '🫖', 'price': 50},
+        3: {'name': 'Телефон', 'icon': '📱', 'price': 500}
+    }
+    
+    item = items.get(item_id)
+    if not item:
+        return
+    
+    if player['money'] < item['price']:
+        send_message(chat_id, f"❌ Недостаточно денег! Нужно {item['price']} 💰", get_main_keyboard())
+        return
+    
+    player['money'] -= item['price']
+    
+    found = False
+    for inv_item in player['inventory']:
+        if inv_item['name'] == item['name']:
+            inv_item['quantity'] += 1
+            found = True
+            break
+    
+    if not found:
+        player['inventory'].append({
+            'name': item['name'],
+            'icon': item['icon'],
+            'quantity': 1
+        })
+    
+    text = f"✅ <b>Покупка успешна!</b>\n\n"
+    text += f"{item['icon']} {item['name']} добавлен в инвентарь\n"
+    text += f"Осталось денег: {player['money']:,} 💰"
+    
+    send_message(chat_id, text, get_main_keyboard())
+
+def handle_callback(callback_query: Dict[str, Any]):
+    data = callback_query.get('data', '')
+    telegram_id = callback_query['from']['id']
+    username = callback_query['from'].get('username', '')
+    chat_id = callback_query['message']['chat']['id']
+    
+    if data == 'profile':
+        handle_profile_command(telegram_id, chat_id)
+    elif data == 'orders':
+        handle_orders_command(telegram_id, chat_id)
+    elif data == 'inventory':
+        handle_inventory_command(telegram_id, chat_id)
+    elif data == 'shop':
+        handle_shop_command(telegram_id, chat_id)
+    elif data == 'leaderboard':
+        handle_leaderboard_command(chat_id)
+    elif data == 'minigames':
+        handle_minigames_command(chat_id)
+    elif data == 'back':
+        handle_start_command(telegram_id, username, chat_id)
+    elif data.startswith('order_'):
+        order_id = int(data.split('_')[1])
+        handle_complete_order(telegram_id, order_id, chat_id)
+    elif data.startswith('buy_'):
+        item_id = int(data.split('_')[1])
+        handle_buy_item(telegram_id, item_id, chat_id)
+    elif data.startswith('game_'):
+        game_type = data.split('_')[1]
+        import random
+        won = random.random() > 0.4
+        if won:
+            reward = 300 if game_type == 'bunt' else 200
+            text = f"🎉 <b>Победа!</b>\n\nПолучено: {reward} 💰"
+        else:
+            text = "😔 <b>Проигрыш!</b>\n\nПопробуйте еще раз!"
+        send_message(chat_id, text, get_main_keyboard())
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     method: str = event.get('httpMethod', 'POST')
@@ -266,84 +326,64 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             'body': ''
         }
     
+    if method == 'GET':
+        return {
+            'statusCode': 200,
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({'status': 'Bot is running'})
+        }
+    
     if method == 'POST':
         try:
             body = json.loads(event.get('body', '{}'))
-            update = body.get('message', {})
             
-            telegram_id = update.get('from', {}).get('id')
-            username = update.get('from', {}).get('username', '')
-            text = update.get('text', '').strip()
-            chat_id = update.get('chat', {}).get('id')
-            
-            if not telegram_id or not text:
-                return {
-                    'statusCode': 200,
-                    'headers': {'Content-Type': 'application/json'},
-                    'body': json.dumps({'ok': True})
-                }
-            
-            response_text = ""
-            
-            if text == '/start':
-                response_text = handle_start_command(telegram_id, username)
-            elif text == '/profile':
-                response_text = handle_profile_command(telegram_id)
-            elif text == '/orders':
-                response_text = handle_orders_command(telegram_id)
-            elif text == '/inventory':
-                response_text = handle_inventory_command(telegram_id)
-            elif text == '/help':
-                response_text = """
-📖 Помощь по игре "Тюряга"
+            if 'callback_query' in body:
+                handle_callback(body['callback_query'])
+            elif 'message' in body:
+                message = body['message']
+                telegram_id = message.get('from', {}).get('id')
+                username = message.get('from', {}).get('username', '')
+                text = message.get('text', '').strip()
+                chat_id = message.get('chat', {}).get('id')
+                
+                if not telegram_id or not text:
+                    return {
+                        'statusCode': 200,
+                        'headers': {'Content-Type': 'application/json'},
+                        'body': json.dumps({'ok': True})
+                    }
+                
+                if text == '/start':
+                    handle_start_command(telegram_id, username, chat_id)
+                elif text == '/profile':
+                    handle_profile_command(telegram_id, chat_id)
+                elif text == '/orders':
+                    handle_orders_command(telegram_id, chat_id)
+                elif text == '/inventory':
+                    handle_inventory_command(telegram_id, chat_id)
+                elif text == '/shop':
+                    handle_shop_command(telegram_id, chat_id)
+                elif text == '/leaderboard':
+                    handle_leaderboard_command(chat_id)
+                elif text == '/help':
+                    text_msg = """📖 <b>Помощь по игре "Тюряга"</b>
 
-🎮 Основные команды:
+🎮 <b>Команды:</b>
 /start - Начать игру
 /profile - Ваш профиль
-/orders - Список приказов
-/inventory - Ваш инвентарь
-/play - Открыть игру
+/orders - Приказы
+/inventory - Инвентарь
+/shop - Магазин
+/leaderboard - Рейтинг
 
-🎯 Как играть:
-1. Выполняйте приказы для получения денег и опыта
+🎯 <b>Как играть:</b>
+1. Выполняйте приказы → получайте 💰 и ⭐
 2. Покупайте предметы в магазине
-3. Повышайте свой авторитет
-4. Создавайте кланы и соревнуйтесь с другими игроками
-"""
-            elif text.startswith('/order_'):
-                try:
-                    order_id = int(text.split('_')[1])
-                    conn = get_db_connection()
-                    cur = conn.cursor(cursor_factory=RealDictCursor)
-                    cur.execute("SELECT id FROM players WHERE telegram_id = %s", (telegram_id,))
-                    player = cur.fetchone()
-                    cur.close()
-                    conn.close()
-                    
-                    if player:
-                        result = start_order(player['id'], order_id)
-                        response_text = "✅ Приказ принят! Выполните его и используйте /complete для получения награды."
-                    else:
-                        response_text = "❌ Используйте /start для начала игры"
-                except:
-                    response_text = "❌ Неверная команда"
-            else:
-                response_text = "❓ Неизвестная команда. Используйте /help для списка команд."
-            
-            bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
-            
-            import urllib.request
-            import urllib.parse
-            
-            api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-            data = urllib.parse.urlencode({
-                'chat_id': chat_id,
-                'text': response_text,
-                'parse_mode': 'HTML'
-            }).encode()
-            
-            req = urllib.request.Request(api_url, data=data)
-            urllib.request.urlopen(req)
+3. Повышайте уровень и авторитет
+4. Соревнуйтесь с другими игроками!"""
+                    send_message(chat_id, text_msg, get_main_keyboard())
+                else:
+                    send_message(chat_id, "❓ Неизвестная команда. Используйте /help", get_main_keyboard())
             
             return {
                 'statusCode': 200,

@@ -99,3 +99,31 @@
     @apply bg-background text-foreground;
   }
 }
+
+@layer utilities {
+  .animate-pulse-slow {
+    animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  .bg-prison-bars {
+    background-image: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 20px,
+      rgba(0, 0, 0, 0.3) 20px,
+      rgba(0, 0, 0, 0.3) 22px
+    );
+  }
+
+  .text-shadow-glow {
+    text-shadow: 0 0 10px rgba(251, 191, 36, 0.5);
+  }
+
+  .hover-lift {
+    transition: transform 0.2s ease;
+  }
+
+  .hover-lift:hover {
+    transform: translateY(-2px);
+  }
+}
