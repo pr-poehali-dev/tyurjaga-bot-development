@@ -1,11 +1,7 @@
-import GameInterface from '@/components/GameInterface';
+import FullGameInterface from '@/components/FullGameInterface';
 
 const Index = () => {
-  return (
-    <div className="min-h-screen bg-gradient-to-b from-[#1a1410] to-[#2d1810]">
-      <GameInterface />
-    </div>
-  );
+  return <FullGameInterface />;
 };
 
 export default Index;
