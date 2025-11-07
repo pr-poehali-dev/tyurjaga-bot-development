@@ -1,0 +1,16 @@
+{
+  "tests": [
+    {
+      "name": "Test get all items",
+      "method": "GET",
+      "path": "/?action=items",
+      "expectedStatus": 200
+    },
+    {
+      "name": "Test get leaderboard",
+      "method": "GET",
+      "path": "/?action=leaderboard",
+      "expectedStatus": 200
+    }
+  ]
+}
